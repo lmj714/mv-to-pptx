@@ -7,12 +7,13 @@ import tempfile
 import io
 import base64
 import socket
+import asyncio
 import cv2
 import requests
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter
 from deep_translator import GoogleTranslator
-from gtts import gTTS
+import edge_tts
 
 # ── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -245,14 +246,23 @@ def prepare_bg_image(img_bytes: bytes | None, brightness: float = 0.60) -> bytes
     except Exception:
         return None
 
-def generate_tts(text: str, lang: str = "ko") -> bytes | None:
-    """gTTS Korean (ko) uses Google's female voice by default."""
+async def _tts_async(text: str, voice: str) -> bytes:
+    communicate = edge_tts.Communicate(text, voice)
+    buf = io.BytesIO()
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            buf.write(chunk["data"])
+    buf.seek(0)
+    return buf.read()
+
+def generate_tts(text: str, voice: str = "ko-KR-SunHiNeural") -> bytes | None:
+    """Microsoft Edge TTS — ko-KR-SunHiNeural is a natural female Korean voice."""
     try:
-        buf = io.BytesIO()
-        # lang='ko' → Google TTS female voice; slow=False keeps natural tempo
-        gTTS(text=text, lang=lang, slow=False).write_to_fp(buf)
-        buf.seek(0)
-        return buf.read()
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_tts_async(text, voice))
+        finally:
+            loop.close()
     except Exception:
         return None
 
@@ -419,15 +429,28 @@ function setSpeed(rate, el){{
   playbackRate = rate;
   document.querySelectorAll('#speed-ctrl button').forEach(b => b.classList.remove('sp-active'));
   el.classList.add('sp-active');
-  if(audioEl) audioEl.playbackRate = rate;
+  if(audioEl && !audioEl.paused){{
+    // Already playing — just change the rate live
+    audioEl.playbackRate = rate;
+  }} else {{
+    // Not playing — replay current slide so user can hear the difference immediately
+    replayCurrentSlide();
+  }}
 }}
 
 function playAudio(b64){{
   if(!b64) return;
   if(audioEl){{ audioEl.pause(); audioEl=null; }}
-  audioEl = new Audio(b64);
-  audioEl.playbackRate = playbackRate;
-  audioEl.play().catch(()=>{{}});
+  const a = new Audio(b64);
+  // Apply rate now and again once metadata is ready (some browsers need this)
+  a.playbackRate = playbackRate;
+  a.addEventListener('canplay', ()=>{{ a.playbackRate = playbackRate; }}, {{once:true}});
+  a.play().catch(()=>{{}});
+  audioEl = a;
+}}
+
+function replayCurrentSlide(){{
+  if(slides[cur] && slides[cur].audio) playAudio(slides[cur].audio);
 }}
 
 function renderSlides(){{
@@ -601,7 +624,7 @@ if st.button("🎵 開始轉換"):
                 total = len(entries)
                 for i, (_, ko) in enumerate(entries):
                     tts_status.text(f"生成語音... ({i+1}/{total})")
-                    audio = generate_tts(ko, lang="ko")
+                    audio = generate_tts(ko, voice="ko-KR-SunHiNeural")
                     if audio: tts_map[i] = audio
                 tts_status.empty()
                 st.success(f"語音生成完成（{len(tts_map)} 句）")
