@@ -204,34 +204,39 @@ def translate_lines(entries: list[tuple[float, str]],
     return translated
 
 
+def _ffmpeg_available() -> bool:
+    """Check if ffmpeg is on PATH."""
+    import shutil
+    return shutil.which("ffmpeg") is not None
+
+
 def download_video(url: str, tmpdir: str, status_ph) -> str | None:
     """Download lowest-quality video for frame extraction. Returns file path."""
     out_tmpl = os.path.join(tmpdir, "video.%(ext)s")
+    # If ffmpeg available, prefer mp4; otherwise take whatever yt-dlp can grab
+    if _ffmpeg_available():
+        fmt = (
+            "bestvideo[height<=360][ext=mp4]"
+            "/bestvideo[height<=360]"
+            "/worst[ext=mp4]/worst"
+        )
+    else:
+        fmt = "worst[ext=mp4]/worst"
+
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
-        # Prefer ≤360p MP4; fallback to any worst
-        "format": (
-            "bestvideo[height<=360][ext=mp4]"
-            "/bestvideo[height<=360]"
-            "/worst[ext=mp4]"
-            "/worst"
-        ),
+        "format": fmt,
         "outtmpl": out_tmpl,
         "noplaylist": True,
     }
     status_ph.text("正在下載 MV 影片（低畫質）以擷取畫面…")
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            ext = info.get("ext", "mp4")
-            path = os.path.join(tmpdir, f"video.{ext}")
-            if os.path.exists(path):
-                return path
-            # Sometimes yt-dlp changes the filename slightly
-            for f in os.listdir(tmpdir):
-                if f.startswith("video."):
-                    return os.path.join(tmpdir, f)
+            ydl.extract_info(url, download=True)
+        for f in os.listdir(tmpdir):
+            if f.startswith("video."):
+                return os.path.join(tmpdir, f)
     except Exception as e:
         status_ph.text(f"影片下載失敗（將改用縮圖背景）：{e}")
     return None
@@ -252,38 +257,61 @@ def get_thumbnail(video_id: str) -> bytes | None:
     return None
 
 
+def _process_frame_image(img: Image.Image, brightness: float = 0.60) -> bytes:
+    """Resize, brighten, blur a PIL Image and return JPEG bytes."""
+    img = img.convert("RGB").resize((1280, 720), Image.LANCZOS)
+    img = ImageEnhance.Brightness(img).enhance(brightness)
+    img = img.filter(ImageFilter.GaussianBlur(radius=1.2))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    buf.seek(0)
+    return buf.read()
+
+
 def extract_frame_bytes(video_path: str, timestamp: float,
-                        brightness: float = 0.38) -> bytes | None:
-    """Extract one video frame at timestamp, darken it, return JPEG bytes."""
+                        brightness: float = 0.60) -> bytes | None:
+    """Extract one video frame: try ffmpeg first, fall back to cv2."""
+    import subprocess, tempfile as _tf
+
+    # ── Method 1: ffmpeg subprocess (works on cloud + local) ────────────────
+    if _ffmpeg_available():
+        tmp_jpg = os.path.join(os.path.dirname(video_path), f"frame_{int(timestamp*1000)}.jpg")
+        try:
+            r = subprocess.run(
+                ["ffmpeg", "-ss", str(timestamp), "-i", video_path,
+                 "-vframes", "1", "-q:v", "3", "-y", tmp_jpg],
+                capture_output=True, timeout=30
+            )
+            if r.returncode == 0 and os.path.exists(tmp_jpg) and os.path.getsize(tmp_jpg) > 0:
+                with open(tmp_jpg, "rb") as f:
+                    raw = f.read()
+                os.unlink(tmp_jpg)
+                img = Image.open(io.BytesIO(raw))
+                return _process_frame_image(img, brightness)
+        except Exception:
+            pass
+        finally:
+            try: os.unlink(tmp_jpg)
+            except: pass
+
+    # ── Method 2: cv2 fallback ───────────────────────────────────────────────
     try:
         cap = cv2.VideoCapture(video_path)
         cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
         ret, frame_bgr = cap.read()
         cap.release()
-        if not ret:
-            return None
-
-        # BGR → RGB → PIL
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        img = Image.fromarray(frame_rgb).convert("RGB")
-
-        # Resize to 1280×720 (pptx 13.33"×7.5" @ 96dpi)
-        img = img.resize((1280, 720), Image.LANCZOS)
-
-        # Darken + slight blur for text legibility
-        img = ImageEnhance.Brightness(img).enhance(brightness)
-        img = img.filter(ImageFilter.GaussianBlur(radius=1.5))
-
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=82)
-        buf.seek(0)
-        return buf.read()
+        if ret:
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame_rgb)
+            return _process_frame_image(img, brightness)
     except Exception:
-        return None
+        pass
+
+    return None
 
 
 def prepare_thumbnail_bg(thumb_bytes: bytes | None,
-                         brightness: float = 0.38) -> bytes | None:
+                         brightness: float = 0.60) -> bytes | None:
     """Darken thumbnail for use as slide background."""
     if not thumb_bytes:
         return None
@@ -365,7 +393,7 @@ def build_pptx(
         try:
             img = Image.open(io.BytesIO(thumb_bytes)).convert("RGB")
             img = img.resize((1280, 720), Image.LANCZOS)
-            img = ImageEnhance.Brightness(img).enhance(0.30)
+            img = ImageEnhance.Brightness(img).enhance(0.50)
             img = img.filter(ImageFilter.GaussianBlur(radius=2))
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=82)
