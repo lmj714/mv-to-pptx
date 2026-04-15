@@ -411,9 +411,9 @@ def build_html(title: str,
 <div id="progress"></div>
 <div id="deck"></div>
 <div id="speed-ctrl">
-  <button onclick="setSpeed(0.9,this)">0.9×</button>
+  <button onclick="setSpeed(1.25,this)">1.25×</button>
   <button onclick="setSpeed(1.0,this)" class="sp-active">1×</button>
-  <button onclick="setSpeed(1.1,this)">1.1×</button>
+  <button onclick="setSpeed(0.75,this)">0.75×</button>
 </div>
 <div id="nav">
   <button onclick="go(-1)">&#8592;</button>
@@ -473,7 +473,7 @@ function playAudio3x(b64, btns){{
       audioEl = null;
       count++;
       if(count < 3){{
-        _repeat3Timer = setTimeout(playOne, 500);
+        _repeat3Timer = setTimeout(playOne, 250);
       }} else {{
         if(btns) btns.forEach(b=>b.disabled=false);
       }}
