@@ -5,15 +5,14 @@ import re
 import time
 import tempfile
 import io
+import base64
+import socket
 import cv2
 import requests
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter
-from pptx import Presentation
-from pptx.util import Inches, Pt
-from pptx.dml.color import RGBColor
-from pptx.enum.text import PP_ALIGN
 from deep_translator import GoogleTranslator
+from gtts import gTTS
 
 # ── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -26,49 +25,29 @@ st.set_page_config(
 st.markdown("""
 <style>
     .main-title {
-        font-size: 2.2rem;
-        font-weight: 800;
-        text-align: center;
+        font-size: 2.2rem; font-weight: 800; text-align: center;
         background: linear-gradient(135deg, #FF6B9D, #C44B8A, #9B59B6);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
         margin-bottom: 0.2rem;
     }
-    .sub-title {
-        text-align: center;
-        color: #888;
-        font-size: 0.95rem;
-        margin-bottom: 2rem;
-    }
+    .sub-title { text-align: center; color: #888; font-size: 0.95rem; margin-bottom: 2rem; }
     .stButton > button {
         width: 100%;
         background: linear-gradient(135deg, #FF6B9D, #9B59B6);
-        color: white;
-        border: none;
-        border-radius: 8px;
-        padding: 0.6rem 1.2rem;
-        font-size: 1rem;
-        font-weight: 600;
-        cursor: pointer;
+        color: white; border: none; border-radius: 8px;
+        padding: 0.6rem 1.2rem; font-size: 1rem; font-weight: 600;
     }
-    .stButton > button:hover { opacity: 0.9; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Title ────────────────────────────────────────────────────────────────────
 st.markdown('<div class="main-title">K-POP 韓語學習簡報產生器 🎤</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">貼上 YouTube MV 網址，自動產生韓中對照投影片（含 MV 畫面）</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">貼上 YouTube MV 網址，自動產生韓中對照投影片（含語音）</div>', unsafe_allow_html=True)
 
 # ── Input ────────────────────────────────────────────────────────────────────
-url = st.text_input(
-    "YouTube 網址",
-    placeholder="https://www.youtube.com/watch?v=...",
-    label_visibility="collapsed",
-)
+url = st.text_input("YouTube 網址", placeholder="https://www.youtube.com/watch?v=...",
+                    label_visibility="collapsed")
 
-import socket
 def _is_cloud() -> bool:
-    """Detect if running on Streamlit Cloud (AWS) by checking hostname."""
     try:
         h = socket.gethostname()
         return "streamlit" in h.lower() or h.startswith("ip-")
@@ -77,14 +56,17 @@ def _is_cloud() -> bool:
 
 _running_on_cloud = _is_cloud()
 
-col1, col2 = st.columns([1, 2])
+col1, col2 = st.columns(2)
 with col1:
     if _running_on_cloud:
         use_mv_frames = False
-        st.info("☁️ 雲端版使用縮圖背景（YouTube 限制雲端下載）")
+        st.info("☁️ 雲端版使用縮圖背景")
     else:
         use_mv_frames = st.checkbox("🎬 擷取 MV 畫面", value=True,
-                                    help="下載低畫質影片並擷取對應畫面作為背景（較慢）；取消勾選則改用縮圖，速度快很多")
+                                    help="下載影片擷取對應畫面（較慢）")
+with col2:
+    use_tts = st.checkbox("🔊 加入韓文語音", value=True,
+                          help="每頁自動朗讀韓文歌詞")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Helper functions
@@ -94,14 +76,8 @@ def get_video_id(url: str) -> str | None:
     m = re.search(r"(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})", url)
     return m.group(1) if m else None
 
-
 def get_video_info(url: str) -> dict:
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "socket_timeout": 15,
-    }
+    ydl_opts = {"quiet": True, "no_warnings": True, "skip_download": True, "socket_timeout": 15}
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -109,18 +85,15 @@ def get_video_info(url: str) -> dict:
                 raise ValueError("影片不存在或無法存取")
             return info
     except SystemExit as e:
-        raise ValueError(f"yt-dlp 錯誤（影片可能不存在或有地區限制）：{e}")
-
+        raise ValueError(f"影片可能不存在或有地區限制：{e}")
 
 def download_subtitles(url: str, tmpdir: str) -> tuple[str | None, str]:
-    """Try manual then auto Korean subtitles. Returns (path, info_str)."""
     base = os.path.join(tmpdir, "subtitle")
     for auto in (False, True):
         ydl_opts = {
             "quiet": True, "no_warnings": True, "skip_download": True,
             "writesubtitles": not auto, "writeautomaticsub": auto,
-            "subtitleslangs": ["ko"], "subtitlesformat": "vtt",
-            "outtmpl": base,
+            "subtitleslangs": ["ko"], "subtitlesformat": "vtt", "outtmpl": base,
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -133,9 +106,7 @@ def download_subtitles(url: str, tmpdir: str) -> tuple[str | None, str]:
                 return candidate, "自動生成" if auto else "官方提供"
     return None, "找不到韓文字幕"
 
-
 def _ts_to_sec(ts: str) -> float:
-    """Convert HH:MM:SS.mmm or MM:SS.mmm to seconds."""
     parts = ts.strip().split(":")
     if len(parts) == 3:
         h, m, s = int(parts[0]), int(parts[1]), float(parts[2])
@@ -143,126 +114,75 @@ def _ts_to_sec(ts: str) -> float:
         h, m, s = 0, int(parts[0]), float(parts[1])
     return h * 3600 + m * 60 + s
 
-
 def parse_vtt(path: str) -> list[tuple[float, str]]:
-    """Return [(start_sec, korean_text), ...] from .vtt file."""
     with open(path, encoding="utf-8") as f:
         content = f.read()
-
-    results: list[tuple[float, str]] = []
-    last_text: str = ""   # Only skip CONSECUTIVE duplicates (subtitle overlap)
-
+    results, last_text = [], ""
     for block in re.split(r"\n\s*\n", content.strip()):
         lines = block.strip().splitlines()
-        ts_sec = None
-        text_parts: list[str] = []
-
+        ts_sec, text_parts = None, []
         for line in lines:
             ts_m = re.match(r"([\d:]+\.[\d]+)\s*-->", line)
             if ts_m:
-                ts_sec = _ts_to_sec(ts_m.group(1))
-                continue
-            if re.match(r"^\d+$", line.strip()) or re.match(r"WEBVTT|NOTE", line):
-                continue
+                ts_sec = _ts_to_sec(ts_m.group(1)); continue
+            if re.match(r"^\d+$", line.strip()) or re.match(r"WEBVTT|NOTE", line): continue
             clean = re.sub(r"<[^>]+>", "", line).strip()
-            if clean:
-                text_parts.append(clean)
-
+            if clean: text_parts.append(clean)
         if ts_sec is not None and text_parts:
             text = " ".join(text_parts)
-            if text != last_text:   # Allow repeats (chorus), block only immediate dupes
+            if text != last_text:
                 last_text = text
                 results.append((ts_sec, text))
-
     return results
-
 
 def parse_srt(path: str) -> list[tuple[float, str]]:
-    """Return [(start_sec, korean_text), ...] from .srt file."""
     with open(path, encoding="utf-8") as f:
         content = f.read()
-
-    results: list[tuple[float, str]] = []
-    last_text: str = ""   # Only skip CONSECUTIVE duplicates
-
+    results, last_text = [], ""
     for block in re.split(r"\n\s*\n", content.strip()):
         lines = block.strip().splitlines()
-        ts_sec = None
-        text_parts: list[str] = []
-
+        ts_sec, text_parts = None, []
         for line in lines:
-            if re.match(r"^\d+$", line.strip()):
-                continue
-            ts_m = re.match(r"([\d:]+,[\d]+)\s*-->", line)
+            if re.match(r"^\d+$", line.strip()): continue
+            ts_m = re.match(r"([\d:,]+)\s*-->", line)
             if ts_m:
-                ts_sec = _ts_to_sec(ts_m.group(1).replace(",", "."))
-                continue
+                ts_sec = _ts_to_sec(ts_m.group(1).replace(",", ".")); continue
             clean = re.sub(r"<[^>]+>", "", line).strip()
-            if clean:
-                text_parts.append(clean)
-
+            if clean: text_parts.append(clean)
         if ts_sec is not None and text_parts:
             text = " ".join(text_parts)
-            if text != last_text:   # Allow repeats (chorus), block only immediate dupes
+            if text != last_text:
                 last_text = text
                 results.append((ts_sec, text))
-
     return results
 
-
 def translate_with_retry(text: str, retries: int = 4, delay: float = 1.5) -> str:
-    """Translate Korean → Traditional Chinese with retry on failure."""
     for attempt in range(retries):
         try:
             result = GoogleTranslator(source="ko", target="zh-TW").translate(text)
-            if result:
-                return result
+            if result: return result
         except Exception:
             pass
         time.sleep(delay * (attempt + 1))
-    return ""   # Return empty string only after all retries exhausted
+    return ""
 
-
-def translate_lines(entries: list[tuple[float, str]],
-                    status_ph) -> list[str]:
-    """Translate all Korean lines, showing progress."""
-    translated: list[str] = []
-    total = len(entries)
-
+def translate_lines(entries: list[tuple[float, str]], status_ph) -> list[str]:
+    translated, total = [], len(entries)
     for i, (_, ko) in enumerate(entries, 1):
-        status_ph.text(f"翻譯中... ({i}/{total}）")
-        zh = translate_with_retry(ko)
-        translated.append(zh)
-        time.sleep(0.1)   # Minimal delay to avoid rate limiting
-
+        status_ph.text(f"翻譯中... ({i}/{total})")
+        translated.append(translate_with_retry(ko))
+        time.sleep(0.1)
     return translated
 
-
 def _ffmpeg_available() -> bool:
-    """Check if ffmpeg is on PATH."""
     import shutil
     return shutil.which("ffmpeg") is not None
 
-
 def download_video(url: str, tmpdir: str, status_ph) -> str | None:
-    """Download lowest-quality video for frame extraction. Returns file path."""
     out_tmpl = os.path.join(tmpdir, "video.%(ext)s")
-    fmt = (
-        "bestvideo[height<=720][ext=mp4]"
-        "/bestvideo[height<=720]"
-        "/bestvideo[height<=480][ext=mp4]"
-        "/bestvideo[height<=480]"
-        "/worst[ext=mp4]/worst"
-    )
-
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "format": fmt,
-        "outtmpl": out_tmpl,
-        "noplaylist": True,
-    }
-    status_ph.text("正在下載 MV 影片（低畫質）以擷取畫面…")
+    fmt = "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/bestvideo[height<=480][ext=mp4]/bestvideo[height<=480]/worst[ext=mp4]/worst"
+    ydl_opts = {"quiet": True, "no_warnings": True, "format": fmt, "outtmpl": out_tmpl, "noplaylist": True}
+    status_ph.text("正在下載 MV 影片…")
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.extract_info(url, download=True)
@@ -270,27 +190,20 @@ def download_video(url: str, tmpdir: str, status_ph) -> str | None:
             if f.startswith("video."):
                 return os.path.join(tmpdir, f)
     except Exception as e:
-        status_ph.text(f"影片下載失敗（將改用縮圖背景）：{e}")
+        status_ph.text(f"影片下載失敗：{e}")
     return None
 
-
 def get_thumbnail(video_id: str) -> bytes | None:
-    """Download YouTube thumbnail, try maxres then hq."""
     for quality in ("maxresdefault", "hqdefault", "mqdefault"):
         try:
-            resp = requests.get(
-                f"https://img.youtube.com/vi/{video_id}/{quality}.jpg",
-                timeout=10
-            )
+            resp = requests.get(f"https://img.youtube.com/vi/{video_id}/{quality}.jpg", timeout=10)
             if resp.status_code == 200 and len(resp.content) > 5000:
                 return resp.content
         except Exception:
             pass
     return None
 
-
 def _process_frame_image(img: Image.Image, brightness: float = 0.60) -> bytes:
-    """Resize to 1280×720 (PPT 13.33"×7.5" @ 96dpi), brighten, light blur → JPEG."""
     img = img.convert("RGB").resize((1280, 720), Image.LANCZOS)
     img = ImageEnhance.Brightness(img).enhance(brightness)
     img = img.filter(ImageFilter.GaussianBlur(radius=0.8))
@@ -299,24 +212,15 @@ def _process_frame_image(img: Image.Image, brightness: float = 0.60) -> bytes:
     buf.seek(0)
     return buf.read()
 
-
 def extract_all_frames(video_path: str, timestamps: list[float],
-                       brightness: float = 0.60,
-                       status_ph=None) -> dict[float, bytes]:
-    """
-    Open the video ONCE with cv2 and extract all frames in a single pass.
-    Returns {timestamp: jpeg_bytes}.  Much faster than per-frame subprocess.
-    """
+                       brightness: float = 0.60, status_ph=None) -> dict[float, bytes]:
     frames: dict[float, bytes] = {}
-    if not video_path or not os.path.exists(video_path):
-        return frames
-
+    if not video_path or not os.path.exists(video_path): return frames
     try:
         cap = cv2.VideoCapture(video_path)
         total = len(timestamps)
         for i, ts in enumerate(timestamps):
-            if status_ph:
-                status_ph.text(f"擷取 MV 畫面... ({i+1}/{total})")
+            if status_ph: status_ph.text(f"擷取 MV 畫面... ({i+1}/{total})")
             cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000)
             ret, frame_bgr = cap.read()
             if ret:
@@ -325,174 +229,261 @@ def extract_all_frames(video_path: str, timestamps: list[float],
         cap.release()
     except Exception:
         pass
-
     return frames
 
-
-def prepare_thumbnail_bg(thumb_bytes: bytes | None,
-                         brightness: float = 0.60) -> bytes | None:
-    """Darken thumbnail for use as slide background."""
-    if not thumb_bytes:
-        return None
+def prepare_bg_image(img_bytes: bytes | None, brightness: float = 0.60) -> bytes | None:
+    if not img_bytes: return None
     try:
-        img = Image.open(io.BytesIO(thumb_bytes)).convert("RGB")
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         img = img.resize((1280, 720), Image.LANCZOS)
         img = ImageEnhance.Brightness(img).enhance(brightness)
-        img = img.filter(ImageFilter.GaussianBlur(radius=1.5))
+        img = img.filter(ImageFilter.GaussianBlur(radius=0.8))
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=82)
+        img.save(buf, format="JPEG", quality=88)
         buf.seek(0)
         return buf.read()
     except Exception:
         return None
 
+def generate_tts(text: str, lang: str = "ko") -> bytes | None:
+    try:
+        buf = io.BytesIO()
+        gTTS(text=text, lang=lang, slow=False).write_to_fp(buf)
+        buf.seek(0)
+        return buf.read()
+    except Exception:
+        return None
 
-def hex_color(h: str) -> RGBColor:
-    h = h.lstrip("#")
-    return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+def b64(data: bytes, mime: str) -> str:
+    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# HTML Builder
+# ═══════════════════════════════════════════════════════════════════════════════
 
-def _add_bg_image(slide, img_bytes: bytes, W, H):
-    """Add image as full-slide background (z-order: bottom)."""
-    pic = slide.shapes.add_picture(io.BytesIO(img_bytes), 0, 0, W, H)
-    sp_tree = slide.shapes._spTree
-    sp_tree.remove(pic._element)
-    sp_tree.insert(2, pic._element)   # Push to back
+def build_html(title: str,
+               entries: list[tuple[float, str]],
+               chinese_lines: list[str],
+               thumb_bytes: bytes | None,
+               frames: dict[float, bytes],
+               tts_map: dict[int, bytes],
+               status_ph) -> str:
 
+    thumb_bg = prepare_bg_image(thumb_bytes, brightness=0.50)
+    cover_bg_css = f"background-image:url('{b64(thumb_bg, 'image/jpeg')}');background-size:cover;background-position:center;" if thumb_bg else "background:#1A0533;"
 
-def _add_solid_bg(slide, color: RGBColor, W, H):
-    """Fallback: solid color background rectangle."""
-    shape = slide.shapes.add_shape(1, 0, 0, W, H)
-    shape.fill.solid()
-    shape.fill.fore_color.rgb = color
-    shape.line.fill.background()
-
-
-def _add_text(slide, text, left, top, width, height,
-              size, bold, color, align=PP_ALIGN.CENTER, italic=False):
-    tb = slide.shapes.add_textbox(left, top, width, height)
-    tf = tb.text_frame
-    tf.word_wrap = True
-    p = tf.paragraphs[0]
-    p.alignment = align
-    run = p.add_run()
-    run.text = text
-    run.font.size = Pt(size)
-    run.font.bold = bold
-    run.font.italic = italic
-    run.font.color.rgb = color
-
-
-def build_pptx(
-    title: str,
-    entries: list[tuple[float, str]],
-    chinese_lines: list[str],
-    thumb_bytes: bytes | None,
-    frames: dict[float, bytes],   # pre-extracted: {timestamp: jpeg_bytes}
-    status_ph,
-) -> bytes:
-    prs = Presentation()
-    prs.slide_width  = Inches(13.33)
-    prs.slide_height = Inches(7.5)
-    W, H = prs.slide_width, prs.slide_height
-
-    COLOR_BG      = hex_color("1A0533")
-    COLOR_ACCENT  = hex_color("FF6B9D")
-    COLOR_WHITE   = hex_color("FFFFFF")
-    COLOR_CHINESE = hex_color("F9C6DD")
-    COLOR_SUB     = hex_color("C490D1")
-
-    blank = prs.slide_layouts[6]
-
-    # ── Cover slide ──────────────────────────────────────────────────────────
-    slide = prs.slides.add_slide(blank)
-
-    # Background: thumbnail (full brightness for cover) or solid
-    if thumb_bytes:
-        try:
-            img = Image.open(io.BytesIO(thumb_bytes)).convert("RGB")
-            img = img.resize((1280, 720), Image.LANCZOS)
-            img = ImageEnhance.Brightness(img).enhance(0.50)
-            img = img.filter(ImageFilter.GaussianBlur(radius=2))
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=82)
-            buf.seek(0)
-            _add_bg_image(slide, buf.read(), W, H)
-        except Exception:
-            _add_solid_bg(slide, COLOR_BG, W, H)
-    else:
-        _add_solid_bg(slide, COLOR_BG, W, H)
-
-    # Top bar
-    bar = slide.shapes.add_shape(1, 0, 0, W, Inches(0.07))
-    bar.fill.solid(); bar.fill.fore_color.rgb = COLOR_ACCENT; bar.line.fill.background()
-
-    _add_text(slide, "K-POP 韓語學習",
-              Inches(0.5), Inches(1.8), Inches(12.33), Inches(0.6),
-              16, False, COLOR_SUB, italic=True)
-    _add_text(slide, title,
-              Inches(0.5), Inches(2.5), Inches(12.33), Inches(2.5),
-              40, True, COLOR_WHITE)
-    _add_text(slide, "· · ·",
-              Inches(0.5), Inches(5.1), Inches(12.33), Inches(0.5),
-              20, False, COLOR_ACCENT)
-    _add_text(slide, "韓中對照學習投影片  /  한중 대조 학습 슬라이드",
-              Inches(0.5), Inches(5.7), Inches(12.33), Inches(0.6),
-              14, False, COLOR_SUB)
-
-    bot = slide.shapes.add_shape(1, 0, H - Inches(0.07), W, Inches(0.07))
-    bot.fill.solid(); bot.fill.fore_color.rgb = COLOR_ACCENT; bot.line.fill.background()
-
-    # ── Thumbnail fallback background (darkened) ─────────────────────────────
-    thumb_bg = prepare_thumbnail_bg(thumb_bytes)
-
-    # ── Lyric slides ─────────────────────────────────────────────────────────
+    slides_js = []
     total = len(entries)
-    for idx, ((ts, ko), zh) in enumerate(zip(entries, chinese_lines), 1):
-        status_ph.text(f"正在生成投影片... ({idx}/{total})")
-        slide = prs.slides.add_slide(blank)
 
-        # Use pre-extracted frame; fallback to thumbnail
-        frame_bg = frames.get(ts)
-        if frame_bg:
-            _add_bg_image(slide, frame_bg, W, H)
-        elif thumb_bg:
-            _add_bg_image(slide, thumb_bg, W, H)
-        else:
-            _add_solid_bg(slide, COLOR_BG, W, H)
+    # Cover slide
+    slides_js.append(f"""{{
+  type:'cover',
+  title:{repr(title)},
+  bg:{repr(b64(thumb_bg,'image/jpeg') if thumb_bg else '')},
+  audio:''
+}}""")
 
-        # Top accent bar
-        t = slide.shapes.add_shape(1, 0, 0, W, Inches(0.06))
-        t.fill.solid(); t.fill.fore_color.rgb = COLOR_ACCENT; t.line.fill.background()
+    for idx, ((ts, ko), zh) in enumerate(zip(entries, chinese_lines)):
+        status_ph.text(f"生成 HTML... ({idx+1}/{total})")
 
-        # Slide number
-        _add_text(slide, f"{idx:02d}",
-                  Inches(0.4), Inches(0.15), Inches(1), Inches(0.5),
-                  13, True, COLOR_ACCENT, align=PP_ALIGN.LEFT)
+        # Background
+        frame = frames.get(ts) or thumb_bg
+        bg_b64 = b64(frame, 'image/jpeg') if frame else ''
 
-        # Korean lyric
-        _add_text(slide, ko,
-                  Inches(0.8), Inches(1.8), Inches(11.73), Inches(2.4),
-                  34, True, COLOR_WHITE)
+        # Audio
+        audio_b64 = ''
+        if idx in tts_map and tts_map[idx]:
+            audio_b64 = b64(tts_map[idx], 'audio/mp3')
 
-        # Separator dot
-        sep = slide.shapes.add_shape(1, Inches(4.5), Inches(4.35), Inches(4.33), Pt(1))
-        sep.fill.solid(); sep.fill.fore_color.rgb = COLOR_ACCENT; sep.line.fill.background()
+        slides_js.append(f"""{{
+  type:'lyric',
+  num:{idx+1},
+  ko:{repr(ko)},
+  zh:{repr(zh if zh else ko)},
+  bg:{repr(bg_b64)},
+  audio:{repr(audio_b64)}
+}}""")
 
-        # Chinese translation
-        _add_text(slide, zh if zh else ko,   # If translation failed, show Korean again
-                  Inches(0.8), Inches(4.6), Inches(11.73), Inches(1.8),
-                  22, False, COLOR_CHINESE)
+    slides_json = ",\n".join(slides_js)
 
-        # Bottom bar
-        b = slide.shapes.add_shape(1, 0, H - Inches(0.06), W, Inches(0.06))
-        b.fill.solid(); b.fill.fore_color.rgb = COLOR_ACCENT; b.line.fill.background()
+    html = f"""<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>{title}</title>
+<style>
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
+  body {{ background:#000; font-family:'Noto Sans KR','Apple SD Gothic Neo','Microsoft JhengHei',sans-serif; overflow:hidden; height:100vh; }}
 
-    buf = io.BytesIO()
-    prs.save(buf)
-    buf.seek(0)
-    return buf.read()
+  #deck {{ width:100%; height:100vh; position:relative; }}
 
+  .slide {{
+    position:absolute; inset:0;
+    display:flex; flex-direction:column; justify-content:center; align-items:center;
+    opacity:0; pointer-events:none; transition:opacity 0.5s ease;
+    background:#1A0533;
+  }}
+  .slide.active {{ opacity:1; pointer-events:all; }}
+  .slide-bg {{
+    position:absolute; inset:0;
+    background-size:cover; background-position:center;
+    z-index:0;
+  }}
+  .slide-content {{ position:relative; z-index:1; text-align:center; padding:2rem; width:100%; }}
+
+  /* Cover */
+  .cover-badge {{ color:#C490D1; font-size:1rem; letter-spacing:0.2em; margin-bottom:1.5rem; font-style:italic; }}
+  .cover-title {{ color:#fff; font-size:clamp(1.8rem,5vw,3.2rem); font-weight:800; line-height:1.3; margin-bottom:1.5rem; text-shadow:0 2px 20px rgba(0,0,0,0.8); }}
+  .cover-dots {{ color:#FF6B9D; font-size:1.5rem; margin-bottom:1rem; }}
+  .cover-sub {{ color:#C490D1; font-size:0.9rem; }}
+
+  /* Lyric */
+  .slide-num {{ position:absolute; top:1rem; left:1.2rem; color:#FF6B9D; font-size:0.9rem; font-weight:700; }}
+  .ko-text {{ color:#fff; font-size:clamp(1.4rem,4.5vw,2.8rem); font-weight:700; line-height:1.5; margin-bottom:1.5rem; text-shadow:0 2px 20px rgba(0,0,0,0.9); }}
+  .divider {{ width:60px; height:2px; background:#FF6B9D; margin:0 auto 1.5rem; }}
+  .zh-text {{ color:#F9C6DD; font-size:clamp(1rem,3vw,1.6rem); line-height:1.6; text-shadow:0 2px 15px rgba(0,0,0,0.9); }}
+
+  /* Top/bottom bars */
+  .bar-top,.bar-bottom {{ position:absolute; left:0; right:0; height:5px; background:#FF6B9D; z-index:2; }}
+  .bar-top {{ top:0; }} .bar-bottom {{ bottom:0; }}
+
+  /* Audio btn */
+  .audio-btn {{
+    position:absolute; bottom:1.5rem; right:1.5rem; z-index:3;
+    background:rgba(255,107,157,0.85); border:none; border-radius:50%;
+    width:48px; height:48px; cursor:pointer; font-size:1.3rem;
+    display:flex; align-items:center; justify-content:center;
+    transition:transform 0.2s; box-shadow:0 2px 10px rgba(0,0,0,0.4);
+  }}
+  .audio-btn:hover {{ transform:scale(1.1); }}
+
+  /* Nav */
+  #nav {{
+    position:fixed; bottom:1.2rem; left:50%; transform:translateX(-50%);
+    display:flex; gap:1rem; align-items:center; z-index:10;
+  }}
+  #nav button {{
+    background:rgba(255,255,255,0.15); border:1px solid rgba(255,255,255,0.3);
+    color:#fff; padding:0.5rem 1.2rem; border-radius:20px; cursor:pointer;
+    font-size:0.9rem; backdrop-filter:blur(8px); transition:background 0.2s;
+  }}
+  #nav button:hover {{ background:rgba(255,107,157,0.5); }}
+  #counter {{ color:rgba(255,255,255,0.6); font-size:0.85rem; min-width:60px; text-align:center; }}
+
+  /* Progress bar */
+  #progress {{ position:fixed; top:0; left:0; height:3px; background:#FF6B9D; z-index:20; transition:width 0.3s; }}
+</style>
+</head>
+<body>
+<div id="progress"></div>
+<div id="deck"></div>
+<div id="nav">
+  <button onclick="go(-1)">&#8592;</button>
+  <span id="counter">1 / 1</span>
+  <button onclick="go(1)">&#8594;</button>
+</div>
+
+<script>
+const slides = [
+{slides_json}
+];
+
+let cur = 0;
+let audioEl = null;
+
+function b64toBlob(b64, mime){{
+  const bytes = atob(b64.split(',')[1]);
+  const arr = new Uint8Array(bytes.length);
+  for(let i=0;i<bytes.length;i++) arr[i]=bytes.charCodeAt(i);
+  return new Blob([arr],{{type:mime}});
+}}
+
+function playAudio(b64){{
+  if(!b64) return;
+  if(audioEl){{ audioEl.pause(); audioEl=null; }}
+  audioEl = new Audio(b64);
+  audioEl.play().catch(()=>{{}});
+}}
+
+function renderSlides(){{
+  const deck = document.getElementById('deck');
+  deck.innerHTML = '';
+  slides.forEach((s,i)=>{{
+    const el = document.createElement('div');
+    el.className = 'slide' + (i===0?' active':'');
+    el.id = 'slide'+i;
+
+    // Background
+    if(s.bg){{
+      const bg = document.createElement('div');
+      bg.className = 'slide-bg';
+      bg.style.backgroundImage = `url('${{s.bg}}')`;
+      el.appendChild(bg);
+    }}
+
+    const bars = '<div class="bar-top"></div><div class="bar-bottom"></div>';
+
+    if(s.type==='cover'){{
+      el.innerHTML += bars + `
+        <div class="slide-content">
+          <div class="cover-badge">K-POP 韓語學習</div>
+          <div class="cover-title">${{s.title}}</div>
+          <div class="cover-dots">· · ·</div>
+          <div class="cover-sub">韓中對照學習投影片 / 한중 대조 학습 슬라이드</div>
+        </div>`;
+    }} else {{
+      const audioBtn = s.audio
+        ? `<button class="audio-btn" onclick="playAudio(slides[${{i}}].audio)" title="播放語音">🔊</button>`
+        : '';
+      el.innerHTML += bars + `
+        <div class="slide-num">${{String(s.num).padStart(2,'0')}}</div>
+        <div class="slide-content">
+          <div class="ko-text">${{s.ko}}</div>
+          <div class="divider"></div>
+          <div class="zh-text">${{s.zh}}</div>
+        </div>
+        ${{audioBtn}}`;
+    }}
+    deck.appendChild(el);
+  }});
+}}
+
+function go(dir){{
+  const prev = cur;
+  cur = Math.max(0, Math.min(slides.length-1, cur+dir));
+  if(cur===prev) return;
+  document.getElementById('slide'+prev).classList.remove('active');
+  document.getElementById('slide'+cur).classList.add('active');
+  document.getElementById('counter').textContent = (cur+1)+' / '+slides.length;
+  document.getElementById('progress').style.width = ((cur/(slides.length-1))*100)+'%';
+  // Auto-play audio on slide change
+  if(slides[cur].audio) playAudio(slides[cur].audio);
+  else if(audioEl){{ audioEl.pause(); audioEl=null; }}
+}}
+
+// Keyboard navigation
+document.addEventListener('keydown', e=>{{
+  if(e.key==='ArrowRight'||e.key==='ArrowDown') go(1);
+  if(e.key==='ArrowLeft'||e.key==='ArrowUp') go(-1);
+}});
+
+// Touch swipe
+let tx=0;
+document.addEventListener('touchstart',e=>{{ tx=e.touches[0].clientX; }});
+document.addEventListener('touchend',e=>{{
+  const dx=tx-e.changedTouches[0].clientX;
+  if(Math.abs(dx)>50) go(dx>0?1:-1);
+}});
+
+renderSlides();
+document.getElementById('counter').textContent = '1 / '+slides.length;
+document.getElementById('progress').style.width = '0%';
+</script>
+</body>
+</html>"""
+
+    return html
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Main flow
@@ -504,71 +495,60 @@ if st.button("🎵 開始轉換"):
     if not re.match(r"https?://(www\.)?(youtube\.com|youtu\.be)/", url.strip()):
         st.error("請輸入有效的 YouTube 網址。"); st.stop()
 
-    # 移除播放清單參數，只保留 v=VIDEO_ID
     vid = get_video_id(url.strip())
     if vid:
         url = f"https://www.youtube.com/watch?v={vid}"
 
-    pptx_bytes: bytes | None = None
+    html_bytes: bytes | None = None
     video_title = "K-POP 影片"
 
     with tempfile.TemporaryDirectory() as tmpdir:
 
-        # ── Step 1: Video info ───────────────────────────────────────────────
+        # Step 1: Video info
         with st.spinner("正在取得影片資訊…"):
             try:
-                info = get_video_info(url.strip())
+                info = get_video_info(url)
                 video_title = info.get("title", "K-POP 影片")
-                video_id    = get_video_id(url.strip()) or info.get("id", "")
+                video_id    = get_video_id(url) or info.get("id", "")
                 st.info(f"影片標題：**{video_title}**")
             except Exception as e:
                 st.error(f"無法取得影片資訊：{e}"); st.stop()
 
-        # ── Step 2: Thumbnail ────────────────────────────────────────────────
+        # Step 2: Thumbnail
         thumb_bytes: bytes | None = None
         with st.spinner("正在下載縮圖…"):
             thumb_bytes = get_thumbnail(video_id)
-            if thumb_bytes:
-                st.success("縮圖下載完成")
+            if thumb_bytes: st.success("縮圖下載完成")
 
-        # ── Step 3: Subtitles ────────────────────────────────────────────────
+        # Step 3: Subtitles
         with st.spinner("正在下載韓文字幕…"):
-            sub_path, sub_info = download_subtitles(url.strip(), tmpdir)
+            sub_path, sub_info = download_subtitles(url, tmpdir)
             if not sub_path:
-                st.error(f"字幕下載失敗：{sub_info}\n此影片可能沒有韓文字幕。"); st.stop()
+                st.error(f"字幕下載失敗：{sub_info}"); st.stop()
             st.success(f"字幕下載成功（{sub_info}）")
 
-        # ── Step 4: Parse subtitles ──────────────────────────────────────────
+        # Step 4: Parse
         with st.spinner("正在解析字幕…"):
             try:
-                entries = (parse_vtt(sub_path) if sub_path.endswith(".vtt")
-                           else parse_srt(sub_path))
+                entries = parse_vtt(sub_path) if sub_path.endswith(".vtt") else parse_srt(sub_path)
                 if not entries:
-                    st.error("字幕解析後沒有找到文字，請換一部影片。"); st.stop()
+                    st.error("字幕解析後沒有找到文字。"); st.stop()
                 st.success(f"共解析到 {len(entries)} 句歌詞")
             except Exception as e:
                 st.error(f"字幕解析失敗：{e}"); st.stop()
 
-        # ── Step 5: Download video (optional) ───────────────────────────────
+        # Step 5: Download video (optional)
         video_path: str | None = None
         frames: dict[float, bytes] = {}
-
         if use_mv_frames:
             dl_status = st.empty()
-            with st.spinner("正在下載 MV 影片（144p）…"):
-                video_path = download_video(url.strip(), tmpdir, dl_status)
+            with st.spinner("正在下載 MV 影片（720p）…"):
+                video_path = download_video(url, tmpdir, dl_status)
                 dl_status.empty()
-                if video_path:
-                    st.success("影片下載完成")
-                else:
-                    st.warning("影片下載失敗，改用縮圖背景")
-        else:
-            st.info("已略過影片下載，使用縮圖作為背景")
+                if video_path: st.success("影片下載完成")
+                else: st.warning("影片下載失敗，改用縮圖背景")
 
-        # ── Step 6: Translate + extract frames ──────────────────────────────
-        trans_status = st.empty()
-
-        # 6a. Batch frame extraction
+        # Step 6: Extract frames
         if video_path:
             frame_status = st.empty()
             with st.spinner("正在批次擷取 MV 畫面…"):
@@ -577,47 +557,58 @@ if st.button("🎵 開始轉換"):
                 frame_status.empty()
                 st.success(f"擷取 {len(frames)}/{len(entries)} 張 MV 畫面")
 
-        # 6b. Translate
+        # Step 7: Translate
+        trans_status = st.empty()
         with st.spinner("正在翻譯成繁體中文…"):
             try:
                 chinese_lines = translate_lines(entries, trans_status)
                 trans_status.empty()
                 failed = sum(1 for z in chinese_lines if not z)
-                if failed:
-                    st.warning(f"翻譯完成（{failed} 句保留韓文原文）")
-                else:
-                    st.success("翻譯完成！")
+                if failed: st.warning(f"翻譯完成（{failed} 句保留韓文原文）")
+                else: st.success("翻譯完成！")
             except Exception as e:
                 st.error(f"翻譯失敗：{e}"); st.stop()
 
-        # ── Step 7: Build PPTX ───────────────────────────────────────────────
-        pptx_status = st.empty()
-        with st.spinner("正在生成投影片…"):
-            try:
-                pptx_bytes = build_pptx(
-                    video_title, entries, chinese_lines,
-                    thumb_bytes, frames, pptx_status
-                )
-                pptx_status.empty()
-                st.success(f"投影片生成完成！共 {len(entries) + 1} 頁（含封面）")
-            except Exception as e:
-                st.error(f"投影片生成失敗：{e}"); st.stop()
+        # Step 8: TTS
+        tts_map: dict[int, bytes] = {}
+        if use_tts:
+            tts_status = st.empty()
+            with st.spinner("正在生成韓文語音…"):
+                total = len(entries)
+                for i, (_, ko) in enumerate(entries):
+                    tts_status.text(f"生成語音... ({i+1}/{total})")
+                    audio = generate_tts(ko, lang="ko")
+                    if audio: tts_map[i] = audio
+                tts_status.empty()
+                st.success(f"語音生成完成（{len(tts_map)} 句）")
 
-    # ── Step 8: Download ─────────────────────────────────────────────────────
-    if pptx_bytes:
+        # Step 9: Build HTML
+        html_status = st.empty()
+        with st.spinner("正在生成 HTML…"):
+            try:
+                html_content = build_html(
+                    video_title, entries, chinese_lines,
+                    thumb_bytes, frames, tts_map, html_status
+                )
+                html_bytes = html_content.encode("utf-8")
+                html_status.empty()
+                st.success(f"HTML 生成完成！共 {len(entries)+1} 頁（含封面）")
+            except Exception as e:
+                st.error(f"HTML 生成失敗：{e}"); st.stop()
+
+    # Step 10: Download
+    if html_bytes:
         safe = re.sub(r'[\\/*?:"<>|]', "_", video_title)[:50]
         st.download_button(
-            label="⬇️ 下載投影片 (.pptx)",
-            data=pptx_bytes,
-            file_name=f"{safe}.pptx",
-            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            label="⬇️ 下載投影片 (.html)",
+            data=html_bytes,
+            file_name=f"{safe}.html",
+            mime="text/html",
         )
 
-# ── Footer ───────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.markdown(
     "<p style='text-align:center;color:#888;font-size:0.8rem;'>"
-    "僅供個人韓語學習用途 · For personal language learning only"
-    "</p>",
+    "僅供個人韓語學習用途 · For personal language learning only</p>",
     unsafe_allow_html=True,
 )
