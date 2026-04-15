@@ -246,8 +246,10 @@ def prepare_bg_image(img_bytes: bytes | None, brightness: float = 0.60) -> bytes
         return None
 
 def generate_tts(text: str, lang: str = "ko") -> bytes | None:
+    """gTTS Korean (ko) uses Google's female voice by default."""
     try:
         buf = io.BytesIO()
+        # lang='ko' → Google TTS female voice; slow=False keeps natural tempo
         gTTS(text=text, lang=lang, slow=False).write_to_fp(buf)
         buf.seek(0)
         return buf.read()
@@ -373,11 +375,31 @@ def build_html(title: str,
 
   /* Progress bar */
   #progress {{ position:fixed; top:0; left:0; height:3px; background:#FF6B9D; z-index:20; transition:width 0.3s; }}
+
+  /* Speed control */
+  #speed-ctrl {{
+    position:fixed; bottom:4.2rem; left:50%; transform:translateX(-50%);
+    display:flex; gap:0.4rem; align-items:center; z-index:10;
+  }}
+  #speed-ctrl button {{
+    background:rgba(255,255,255,0.10); border:1px solid rgba(255,255,255,0.22);
+    color:#bbb; padding:0.28rem 0.75rem; border-radius:14px; cursor:pointer;
+    font-size:0.78rem; backdrop-filter:blur(8px); transition:all 0.18s;
+  }}
+  #speed-ctrl button.sp-active {{
+    background:rgba(255,107,157,0.55); border-color:#FF6B9D; color:#fff; font-weight:700;
+  }}
+  #speed-ctrl button:hover {{ background:rgba(255,107,157,0.30); color:#fff; }}
 </style>
 </head>
 <body>
 <div id="progress"></div>
 <div id="deck"></div>
+<div id="speed-ctrl">
+  <button onclick="setSpeed(0.9,this)">0.9×</button>
+  <button onclick="setSpeed(1.0,this)" class="sp-active">1×</button>
+  <button onclick="setSpeed(1.1,this)">1.1×</button>
+</div>
 <div id="nav">
   <button onclick="go(-1)">&#8592;</button>
   <span id="counter">1 / 1</span>
@@ -391,18 +413,20 @@ const slides = [
 
 let cur = 0;
 let audioEl = null;
+let playbackRate = 1.0;
 
-function b64toBlob(b64, mime){{
-  const bytes = atob(b64.split(',')[1]);
-  const arr = new Uint8Array(bytes.length);
-  for(let i=0;i<bytes.length;i++) arr[i]=bytes.charCodeAt(i);
-  return new Blob([arr],{{type:mime}});
+function setSpeed(rate, el){{
+  playbackRate = rate;
+  document.querySelectorAll('#speed-ctrl button').forEach(b => b.classList.remove('sp-active'));
+  el.classList.add('sp-active');
+  if(audioEl) audioEl.playbackRate = rate;
 }}
 
 function playAudio(b64){{
   if(!b64) return;
   if(audioEl){{ audioEl.pause(); audioEl=null; }}
   audioEl = new Audio(b64);
+  audioEl.playbackRate = playbackRate;
   audioEl.play().catch(()=>{{}});
 }}
 
