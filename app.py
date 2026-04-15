@@ -7,13 +7,18 @@ import tempfile
 import io
 import cv2
 import requests
+import zipfile
+import shutil
 import numpy as np
+from pathlib import Path
 from PIL import Image, ImageEnhance, ImageFilter
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
+from pptx.opc.constants import RELATIONSHIP_TYPE as RT
 from deep_translator import GoogleTranslator
+from gtts import gTTS
 
 # ── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -85,6 +90,9 @@ with col1:
     else:
         use_mv_frames = st.checkbox("🎬 擷取 MV 畫面", value=True,
                                     help="下載低畫質影片並擷取對應畫面作為背景（較慢）；取消勾選則改用縮圖，速度快很多")
+with col2:
+    use_tts = st.checkbox("🔊 加入韓文語音（TTS）", value=True,
+                          help="為每張投影片加入 AI 朗讀的韓文語音，在 PowerPoint 中點擊即可播放")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Helper functions
@@ -327,6 +335,188 @@ def extract_all_frames(video_path: str, timestamps: list[float],
         pass
 
     return frames
+
+
+def generate_tts_audio(text: str, lang: str = "ko") -> bytes | None:
+    """Generate TTS mp3 bytes for given text using gTTS."""
+    try:
+        buf = io.BytesIO()
+        gTTS(text=text, lang=lang, slow=False).write_to_fp(buf)
+        buf.seek(0)
+        return buf.read()
+    except Exception:
+        return None
+
+
+def generate_all_tts(entries: list[tuple[float, str]], status_ph) -> dict[int, bytes]:
+    """Generate TTS for all Korean lyrics. Returns {index: mp3_bytes}."""
+    result: dict[int, bytes] = {}
+    total = len(entries)
+    for i, (_, ko) in enumerate(entries):
+        status_ph.text(f"生成語音... ({i+1}/{total})")
+        audio = generate_tts_audio(ko, lang="ko")
+        if audio:
+            result[i] = audio
+    return result
+
+
+def embed_audio_into_pptx(pptx_bytes: bytes,
+                           audio_map: dict[int, bytes]) -> bytes:
+    """
+    Embed TTS mp3 files into each lyric slide (slide index 1..N, slide 0 is cover).
+    Uses direct ZIP manipulation since python-pptx has no audio API.
+    Returns modified pptx bytes.
+    """
+    if not audio_map:
+        return pptx_bytes
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # ── Unpack PPTX (it's a ZIP) ─────────────────────────────────────────
+        pptx_path = os.path.join(tmp, "deck.pptx")
+        with open(pptx_path, "wb") as f:
+            f.write(pptx_bytes)
+
+        unpack_dir = os.path.join(tmp, "unpacked")
+        with zipfile.ZipFile(pptx_path, "r") as z:
+            z.extractall(unpack_dir)
+
+        media_dir = os.path.join(unpack_dir, "ppt", "media")
+        os.makedirs(media_dir, exist_ok=True)
+        slides_dir  = os.path.join(unpack_dir, "ppt", "slides")
+        rels_dir    = os.path.join(unpack_dir, "ppt", "slides", "_rels")
+        os.makedirs(rels_dir, exist_ok=True)
+
+        # ── Embed audio for each lyric slide ────────────────────────────────
+        # Slide 0 = cover → lyric slides start at slide index 1
+        for lyric_idx, mp3_bytes in audio_map.items():
+            slide_num = lyric_idx + 2          # slide files are 1-based; +1 for cover
+            media_name = f"audio{lyric_idx + 1}.mp3"
+            media_path = os.path.join(media_dir, media_name)
+
+            # Write mp3
+            with open(media_path, "wb") as f:
+                f.write(mp3_bytes)
+
+            # ── Update slide rels XML ────────────────────────────────────────
+            rels_file = os.path.join(rels_dir, f"slide{slide_num}.xml.rels")
+            audio_rel_type = (
+                "http://schemas.openxmlformats.org/officeDocument/2006/"
+                "relationships/audio"
+            )
+
+            if os.path.exists(rels_file):
+                with open(rels_file, encoding="utf-8") as f:
+                    rels_xml = f.read()
+                # Find next rId number
+                existing_ids = re.findall(r'Id="rId(\d+)"', rels_xml)
+                next_id = max((int(x) for x in existing_ids), default=0) + 1
+                audio_rid = f"rId{next_id}"
+                # Insert before closing tag
+                new_rel = (
+                    f'<Relationship Id="{audio_rid}" '
+                    f'Type="{audio_rel_type}" '
+                    f'Target="../media/{media_name}"/>'
+                )
+                rels_xml = rels_xml.replace("</Relationships>",
+                                            f"{new_rel}</Relationships>")
+            else:
+                audio_rid = "rId1"
+                rels_xml = (
+                    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                    '<Relationships xmlns="http://schemas.openxmlformats.org/'
+                    'package/2006/relationships">'
+                    f'<Relationship Id="{audio_rid}" '
+                    f'Type="{audio_rel_type}" '
+                    f'Target="../media/{media_name}"/>'
+                    "</Relationships>"
+                )
+
+            with open(rels_file, "w", encoding="utf-8") as f:
+                f.write(rels_xml)
+
+            # ── Update slide XML: add audio element ──────────────────────────
+            slide_file = os.path.join(slides_dir, f"slide{slide_num}.xml")
+            if not os.path.exists(slide_file):
+                continue
+
+            with open(slide_file, encoding="utf-8") as f:
+                slide_xml = f.read()
+
+            # Build audio shape XML (invisible icon, auto-play, loop-off)
+            audio_shape = f"""<p:sp>
+  <p:nvSpPr>
+    <p:cNvPr id="999" name="Audio_{lyric_idx}"/>
+    <p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>
+    <p:nvPr>
+      <p:ph type="body"/>
+      <a:audioFile r:link="{audio_rid}"/>
+    </p:nvPr>
+  </p:nvSpPr>
+  <p:spPr>
+    <a:xfrm><a:off x="457200" y="6400000"/><a:ext cx="457200" cy="457200"/></a:xfrm>
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+  </p:spPr>
+</p:sp>"""
+
+            # PowerPoint requires a <p:timing> block to auto-play audio
+            timing_xml = f"""<p:timing>
+  <p:tnLst>
+    <p:par>
+      <p:cTn id="1" dur="indefin" restart="whenNotActive" nodeType="tmRoot">
+        <p:childTnLst>
+          <p:par>
+            <p:cTn id="2" fill="hold">
+              <p:stCondLst><p:cond delay="0"/></p:stCondLst>
+              <p:childTnLst>
+                <p:par>
+                  <p:cTn id="3" presetID="1" presetClass="mediacall"
+                         presetSubtype="0" fill="hold" nodeType="clickEffect">
+                    <p:stCondLst><p:cond delay="0"/></p:stCondLst>
+                    <p:childTnLst>
+                      <p:audio>
+                        <p:cMediaNode vol="80000" showWhenStopped="0">
+                          <p:cTn id="4" fill="hold"><p:stCondLst>
+                            <p:cond delay="0"/>
+                          </p:stCondLst></p:cTn>
+                          <p:tgtEl>
+                            <p:spTgt spid="999"/>
+                          </p:tgtEl>
+                        </p:cMediaNode>
+                      </p:audio>
+                    </p:childTnLst>
+                  </p:cTn>
+                </p:par>
+              </p:childTnLst>
+            </p:cTn>
+          </p:par>
+        </p:childTnLst>
+      </p:cTn>
+    </p:par>
+  </p:tnLst>
+</p:timing>"""
+
+            # Insert audio shape before </p:spTree>
+            slide_xml = slide_xml.replace("</p:spTree>",
+                                          f"{audio_shape}</p:spTree>")
+            # Insert timing before </p:cSld> closing
+            if "<p:timing>" not in slide_xml:
+                slide_xml = slide_xml.replace("</p:cSld>",
+                                              f"</p:cSld>{timing_xml}")
+
+            with open(slide_file, "w", encoding="utf-8") as f:
+                f.write(slide_xml)
+
+        # ── Re-pack into PPTX ────────────────────────────────────────────────
+        out_path = os.path.join(tmp, "output.pptx")
+        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for root, _, files in os.walk(unpack_dir):
+                for fname in files:
+                    fpath = os.path.join(root, fname)
+                    arcname = os.path.relpath(fpath, unpack_dir)
+                    zout.write(fpath, arcname)
+
+        with open(out_path, "rb") as f:
+            return f.read()
 
 
 def prepare_thumbnail_bg(thumb_bytes: bytes | None,
@@ -602,6 +792,22 @@ if st.button("🎵 開始轉換"):
                 st.success(f"投影片生成完成！共 {len(entries) + 1} 頁（含封面）")
             except Exception as e:
                 st.error(f"投影片生成失敗：{e}"); st.stop()
+
+        # ── Step 8: TTS（optional）──────────────────────────────────────────
+        if use_tts and pptx_bytes:
+            tts_status = st.empty()
+            with st.spinner("正在生成韓文語音（TTS）…"):
+                try:
+                    audio_map = generate_all_tts(entries, tts_status)
+                    tts_status.empty()
+                    if audio_map:
+                        pptx_bytes = embed_audio_into_pptx(pptx_bytes, audio_map)
+                        st.success(f"語音嵌入完成！共 {len(audio_map)} 句")
+                    else:
+                        st.warning("TTS 生成失敗，投影片不含語音")
+                except Exception as e:
+                    tts_status.empty()
+                    st.warning(f"TTS 嵌入失敗（投影片仍可下載）：{e}")
 
     # ── Step 8: Download ─────────────────────────────────────────────────────
     if pptx_bytes:
