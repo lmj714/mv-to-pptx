@@ -258,56 +258,43 @@ def get_thumbnail(video_id: str) -> bytes | None:
 
 
 def _process_frame_image(img: Image.Image, brightness: float = 0.60) -> bytes:
-    """Resize, brighten, blur a PIL Image and return JPEG bytes."""
-    img = img.convert("RGB").resize((1280, 720), Image.LANCZOS)
+    """Resize to 854×480 (enough for PPT bg), brighten, light blur → JPEG."""
+    img = img.convert("RGB").resize((854, 480), Image.LANCZOS)
     img = ImageEnhance.Brightness(img).enhance(brightness)
-    img = img.filter(ImageFilter.GaussianBlur(radius=1.2))
+    img = img.filter(ImageFilter.GaussianBlur(radius=0.8))
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=85)
+    img.save(buf, format="JPEG", quality=80)
     buf.seek(0)
     return buf.read()
 
 
-def extract_frame_bytes(video_path: str, timestamp: float,
-                        brightness: float = 0.60) -> bytes | None:
-    """Extract one video frame: try ffmpeg first, fall back to cv2."""
-    import subprocess, tempfile as _tf
+def extract_all_frames(video_path: str, timestamps: list[float],
+                       brightness: float = 0.60,
+                       status_ph=None) -> dict[float, bytes]:
+    """
+    Open the video ONCE with cv2 and extract all frames in a single pass.
+    Returns {timestamp: jpeg_bytes}.  Much faster than per-frame subprocess.
+    """
+    frames: dict[float, bytes] = {}
+    if not video_path or not os.path.exists(video_path):
+        return frames
 
-    # ── Method 1: ffmpeg subprocess (works on cloud + local) ────────────────
-    if _ffmpeg_available():
-        tmp_jpg = os.path.join(os.path.dirname(video_path), f"frame_{int(timestamp*1000)}.jpg")
-        try:
-            r = subprocess.run(
-                ["ffmpeg", "-ss", str(timestamp), "-i", video_path,
-                 "-vframes", "1", "-q:v", "3", "-y", tmp_jpg],
-                capture_output=True, timeout=30
-            )
-            if r.returncode == 0 and os.path.exists(tmp_jpg) and os.path.getsize(tmp_jpg) > 0:
-                with open(tmp_jpg, "rb") as f:
-                    raw = f.read()
-                os.unlink(tmp_jpg)
-                img = Image.open(io.BytesIO(raw))
-                return _process_frame_image(img, brightness)
-        except Exception:
-            pass
-        finally:
-            try: os.unlink(tmp_jpg)
-            except: pass
-
-    # ── Method 2: cv2 fallback ───────────────────────────────────────────────
     try:
         cap = cv2.VideoCapture(video_path)
-        cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
-        ret, frame_bgr = cap.read()
+        total = len(timestamps)
+        for i, ts in enumerate(timestamps):
+            if status_ph:
+                status_ph.text(f"擷取 MV 畫面... ({i+1}/{total})")
+            cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000)
+            ret, frame_bgr = cap.read()
+            if ret:
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                frames[ts] = _process_frame_image(Image.fromarray(frame_rgb), brightness)
         cap.release()
-        if ret:
-            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(frame_rgb)
-            return _process_frame_image(img, brightness)
     except Exception:
         pass
 
-    return None
+    return frames
 
 
 def prepare_thumbnail_bg(thumb_bytes: bytes | None,
@@ -369,7 +356,7 @@ def build_pptx(
     entries: list[tuple[float, str]],
     chinese_lines: list[str],
     thumb_bytes: bytes | None,
-    video_path: str | None,
+    frames: dict[float, bytes],   # pre-extracted: {timestamp: jpeg_bytes}
     status_ph,
 ) -> bytes:
     prs = Presentation()
@@ -433,12 +420,8 @@ def build_pptx(
         status_ph.text(f"正在生成投影片... ({idx}/{total})")
         slide = prs.slides.add_slide(blank)
 
-        # 1. Try extracting the actual MV frame
-        frame_bg = None
-        if video_path and os.path.exists(video_path):
-            frame_bg = extract_frame_bytes(video_path, ts)
-
-        # 2. Fallback to darkened thumbnail
+        # Use pre-extracted frame; fallback to thumbnail
+        frame_bg = frames.get(ts)
         if frame_bg:
             _add_bg_image(slide, frame_bg, W, H)
         elif thumb_bg:
@@ -529,26 +512,37 @@ if st.button("🎵 開始轉換"):
             except Exception as e:
                 st.error(f"字幕解析失敗：{e}"); st.stop()
 
-        # ── Step 5: Download video for frame extraction ──────────────────────
+        # ── Step 5: Download video ───────────────────────────────────────────
         video_path: str | None = None
         dl_status = st.empty()
-        with st.spinner("正在下載 MV 影片（擷取畫面用）…"):
+        with st.spinner("正在下載 MV 影片（低畫質，擷取畫面用）…"):
             video_path = download_video(url.strip(), tmpdir, dl_status)
             dl_status.empty()
             if video_path:
-                st.success(f"影片下載完成，將逐幀擷取 MV 畫面")
+                st.success("影片下載完成")
             else:
                 st.warning("影片下載失敗，將改用縮圖作為投影片背景")
 
-        # ── Step 6: Translate ────────────────────────────────────────────────
+        # ── Step 6: Translate（同時擷取畫面，平行進行）───────────────────────
         trans_status = st.empty()
-        with st.spinner("正在翻譯成繁體中文…"):
+        frames: dict[float, bytes] = {}
+
+        with st.spinner("正在翻譯並批次擷取 MV 畫面…"):
+            # 6a. Batch extract ALL frames at once (open video once, seek N times)
+            if video_path:
+                frame_status = st.empty()
+                timestamps = [ts for ts, _ in entries]
+                frames = extract_all_frames(video_path, timestamps, status_ph=frame_status)
+                frame_status.empty()
+                st.success(f"成功擷取 {len(frames)}/{len(entries)} 張 MV 畫面")
+
+            # 6b. Translate
             try:
                 chinese_lines = translate_lines(entries, trans_status)
                 trans_status.empty()
                 failed = sum(1 for z in chinese_lines if not z)
                 if failed:
-                    st.warning(f"翻譯完成（{failed} 句翻譯失敗，將保留韓文原文）")
+                    st.warning(f"翻譯完成（{failed} 句保留韓文原文）")
                 else:
                     st.success("翻譯完成！")
             except Exception as e:
@@ -560,7 +554,7 @@ if st.button("🎵 開始轉換"):
             try:
                 pptx_bytes = build_pptx(
                     video_title, entries, chinese_lines,
-                    thumb_bytes, video_path, pptx_status
+                    thumb_bytes, frames, pptx_status
                 )
                 pptx_status.empty()
                 st.success(f"投影片生成完成！共 {len(entries) + 1} 頁（含封面）")
