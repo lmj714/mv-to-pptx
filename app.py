@@ -66,6 +66,11 @@ url = st.text_input(
     label_visibility="collapsed",
 )
 
+col1, col2 = st.columns([1, 2])
+with col1:
+    use_mv_frames = st.checkbox("🎬 擷取 MV 畫面", value=True,
+                                help="下載低畫質影片並擷取對應畫面作為背景（較慢）；取消勾選則改用縮圖，速度快很多")
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Helper functions
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -76,9 +81,20 @@ def get_video_id(url: str) -> str | None:
 
 
 def get_video_info(url: str) -> dict:
-    ydl_opts = {"quiet": True, "no_warnings": True, "skip_download": True}
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        return ydl.extract_info(url, download=False)
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "socket_timeout": 15,
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if info is None:
+                raise ValueError("影片不存在或無法存取")
+            return info
+    except SystemExit as e:
+        raise ValueError(f"yt-dlp 錯誤（影片可能不存在或有地區限制）：{e}")
 
 
 def download_subtitles(url: str, tmpdir: str) -> tuple[str | None, str]:
@@ -91,8 +107,11 @@ def download_subtitles(url: str, tmpdir: str) -> tuple[str | None, str]:
             "subtitleslangs": ["ko"], "subtitlesformat": "vtt",
             "outtmpl": base,
         }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+        except (SystemExit, Exception):
+            pass
         for ext in ("vtt", "srt"):
             candidate = f"{base}.ko.{ext}"
             if os.path.exists(candidate):
@@ -199,7 +218,7 @@ def translate_lines(entries: list[tuple[float, str]],
         status_ph.text(f"翻譯中... ({i}/{total}）")
         zh = translate_with_retry(ko)
         translated.append(zh)
-        time.sleep(0.3)   # Avoid rate limiting
+        time.sleep(0.1)   # Minimal delay to avoid rate limiting
 
     return translated
 
@@ -213,15 +232,14 @@ def _ffmpeg_available() -> bool:
 def download_video(url: str, tmpdir: str, status_ph) -> str | None:
     """Download lowest-quality video for frame extraction. Returns file path."""
     out_tmpl = os.path.join(tmpdir, "video.%(ext)s")
-    # If ffmpeg available, prefer mp4; otherwise take whatever yt-dlp can grab
-    if _ffmpeg_available():
-        fmt = (
-            "bestvideo[height<=360][ext=mp4]"
-            "/bestvideo[height<=360]"
-            "/worst[ext=mp4]/worst"
-        )
-    else:
-        fmt = "worst[ext=mp4]/worst"
+    # 144p is the smallest → fastest download; fall back if unavailable
+    fmt = (
+        "bestvideo[height<=144][ext=mp4]"
+        "/bestvideo[height<=144]"
+        "/bestvideo[height<=240][ext=mp4]"
+        "/bestvideo[height<=240]"
+        "/worst[ext=mp4]/worst"
+    )
 
     ydl_opts = {
         "quiet": True,
@@ -512,31 +530,36 @@ if st.button("🎵 開始轉換"):
             except Exception as e:
                 st.error(f"字幕解析失敗：{e}"); st.stop()
 
-        # ── Step 5: Download video ───────────────────────────────────────────
+        # ── Step 5: Download video (optional) ───────────────────────────────
         video_path: str | None = None
-        dl_status = st.empty()
-        with st.spinner("正在下載 MV 影片（低畫質，擷取畫面用）…"):
-            video_path = download_video(url.strip(), tmpdir, dl_status)
-            dl_status.empty()
-            if video_path:
-                st.success("影片下載完成")
-            else:
-                st.warning("影片下載失敗，將改用縮圖作為投影片背景")
-
-        # ── Step 6: Translate（同時擷取畫面，平行進行）───────────────────────
-        trans_status = st.empty()
         frames: dict[float, bytes] = {}
 
-        with st.spinner("正在翻譯並批次擷取 MV 畫面…"):
-            # 6a. Batch extract ALL frames at once (open video once, seek N times)
-            if video_path:
-                frame_status = st.empty()
+        if use_mv_frames:
+            dl_status = st.empty()
+            with st.spinner("正在下載 MV 影片（144p）…"):
+                video_path = download_video(url.strip(), tmpdir, dl_status)
+                dl_status.empty()
+                if video_path:
+                    st.success("影片下載完成")
+                else:
+                    st.warning("影片下載失敗，改用縮圖背景")
+        else:
+            st.info("已略過影片下載，使用縮圖作為背景")
+
+        # ── Step 6: Translate + extract frames ──────────────────────────────
+        trans_status = st.empty()
+
+        # 6a. Batch frame extraction
+        if video_path:
+            frame_status = st.empty()
+            with st.spinner("正在批次擷取 MV 畫面…"):
                 timestamps = [ts for ts, _ in entries]
                 frames = extract_all_frames(video_path, timestamps, status_ph=frame_status)
                 frame_status.empty()
-                st.success(f"成功擷取 {len(frames)}/{len(entries)} 張 MV 畫面")
+                st.success(f"擷取 {len(frames)}/{len(entries)} 張 MV 畫面")
 
-            # 6b. Translate
+        # 6b. Translate
+        with st.spinner("正在翻譯成繁體中文…"):
             try:
                 chinese_lines = translate_lines(entries, trans_status)
                 trans_status.empty()
