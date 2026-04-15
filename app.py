@@ -66,10 +66,25 @@ url = st.text_input(
     label_visibility="collapsed",
 )
 
+import socket
+def _is_cloud() -> bool:
+    """Detect if running on Streamlit Cloud (AWS) by checking hostname."""
+    try:
+        h = socket.gethostname()
+        return "streamlit" in h.lower() or h.startswith("ip-")
+    except Exception:
+        return False
+
+_running_on_cloud = _is_cloud()
+
 col1, col2 = st.columns([1, 2])
 with col1:
-    use_mv_frames = st.checkbox("🎬 擷取 MV 畫面", value=True,
-                                help="下載低畫質影片並擷取對應畫面作為背景（較慢）；取消勾選則改用縮圖，速度快很多")
+    if _running_on_cloud:
+        use_mv_frames = False
+        st.info("☁️ 雲端版使用縮圖背景（YouTube 限制雲端下載）")
+    else:
+        use_mv_frames = st.checkbox("🎬 擷取 MV 畫面", value=True,
+                                    help="下載低畫質影片並擷取對應畫面作為背景（較慢）；取消勾選則改用縮圖，速度快很多")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Helper functions
