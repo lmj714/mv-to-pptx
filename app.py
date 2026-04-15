@@ -360,15 +360,20 @@ def build_html(title: str,
   .bar-top,.bar-bottom {{ position:absolute; left:0; right:0; height:5px; background:#FF6B9D; z-index:2; }}
   .bar-top {{ top:0; }} .bar-bottom {{ bottom:0; }}
 
-  /* Audio btn */
-  .audio-btn {{
-    position:absolute; bottom:1.5rem; right:1.5rem; z-index:3;
-    background:rgba(255,107,157,0.85); border:none; border-radius:50%;
-    width:48px; height:48px; cursor:pointer; font-size:1.3rem;
-    display:flex; align-items:center; justify-content:center;
-    transition:transform 0.2s; box-shadow:0 2px 10px rgba(0,0,0,0.4);
+  /* Audio buttons — centered above nav */
+  .audio-btns {{
+    position:absolute; bottom:5.2rem; left:50%; transform:translateX(-50%);
+    display:flex; gap:0.7rem; z-index:3; white-space:nowrap;
   }}
-  .audio-btn:hover {{ transform:scale(1.1); }}
+  .audio-btn {{
+    background:rgba(255,107,157,0.82); border:none; border-radius:24px;
+    padding:0.45rem 1.1rem; cursor:pointer; font-size:1rem; color:#fff;
+    display:flex; align-items:center; gap:0.4rem; font-weight:600;
+    transition:transform 0.2s, background 0.2s; box-shadow:0 2px 10px rgba(0,0,0,0.4);
+    backdrop-filter:blur(6px);
+  }}
+  .audio-btn:hover {{ transform:scale(1.06); background:rgba(255,107,157,1); }}
+  .audio-btn:disabled {{ opacity:0.5; cursor:default; transform:none; }}
 
   /* Nav */
   #nav {{
@@ -438,15 +443,44 @@ function setSpeed(rate, el){{
   }}
 }}
 
+function _makeAudio(b64){{
+  const a = new Audio(b64);
+  a.playbackRate = playbackRate;
+  a.addEventListener('canplay', ()=>{{ a.playbackRate = playbackRate; }}, {{once:true}});
+  return a;
+}}
+
 function playAudio(b64){{
   if(!b64) return;
   if(audioEl){{ audioEl.pause(); audioEl=null; }}
-  const a = new Audio(b64);
-  // Apply rate now and again once metadata is ready (some browsers need this)
-  a.playbackRate = playbackRate;
-  a.addEventListener('canplay', ()=>{{ a.playbackRate = playbackRate; }}, {{once:true}});
-  a.play().catch(()=>{{}});
-  audioEl = a;
+  audioEl = _makeAudio(b64);
+  audioEl.play().catch(()=>{{}});
+}}
+
+let _repeat3Timer = null;
+function playAudio3x(b64, btns){{
+  if(!b64) return;
+  // Disable buttons while playing
+  if(btns) btns.forEach(b=>b.disabled=true);
+  if(_repeat3Timer) clearTimeout(_repeat3Timer);
+  if(audioEl){{ audioEl.pause(); audioEl=null; }}
+  let count = 0;
+  function playOne(){{
+    if(audioEl){{ audioEl.pause(); audioEl=null; }}
+    const a = _makeAudio(b64);
+    audioEl = a;
+    a.addEventListener('ended', ()=>{{
+      audioEl = null;
+      count++;
+      if(count < 3){{
+        _repeat3Timer = setTimeout(playOne, 500);
+      }} else {{
+        if(btns) btns.forEach(b=>b.disabled=false);
+      }}
+    }});
+    a.play().catch(()=>{{ if(btns) btns.forEach(b=>b.disabled=false); }});
+  }}
+  playOne();
 }}
 
 function replayCurrentSlide(){{
@@ -480,9 +514,11 @@ function renderSlides(){{
           <div class="cover-sub">韓中對照學習投影片 / 한중 대조 학습 슬라이드</div>
         </div>`;
     }} else {{
-      const audioBtn = s.audio
-        ? `<button class="audio-btn" onclick="playAudio(slides[${{i}}].audio)" title="播放語音">🔊</button>`
-        : '';
+      const audioBtns = s.audio ? `
+        <div class="audio-btns" id="abtns${{i}}">
+          <button class="audio-btn" onclick="playAudio(slides[${{i}}].audio)" title="播放一次">▶ 播放</button>
+          <button class="audio-btn" onclick="playAudio3x(slides[${{i}}].audio,[...document.querySelectorAll('#abtns${{i}} button')])" title="播放三次">🔁 ×3</button>
+        </div>` : '';
       el.innerHTML += bars + `
         <div class="slide-num">${{String(s.num).padStart(2,'0')}}</div>
         <div class="slide-content">
@@ -490,7 +526,7 @@ function renderSlides(){{
           <div class="divider"></div>
           <div class="zh-text">${{s.zh}}</div>
         </div>
-        ${{audioBtn}}`;
+        ${{audioBtns}}`;
     }}
     deck.appendChild(el);
   }});
