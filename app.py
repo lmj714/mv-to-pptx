@@ -13,7 +13,7 @@ from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
-from googletrans import Translator
+from deep_translator import GoogleTranslator
 
 # ── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -176,14 +176,13 @@ def parse_srt(path: str) -> list[tuple[float, str]]:
     return results
 
 
-def translate_with_retry(translator: Translator, text: str,
-                         retries: int = 4, delay: float = 1.5) -> str:
+def translate_with_retry(text: str, retries: int = 4, delay: float = 1.5) -> str:
     """Translate Korean → Traditional Chinese with retry on failure."""
     for attempt in range(retries):
         try:
-            result = translator.translate(text, src="ko", dest="zh-tw")
-            if result and result.text:
-                return result.text
+            result = GoogleTranslator(source="ko", target="zh-TW").translate(text)
+            if result:
+                return result
         except Exception:
             pass
         time.sleep(delay * (attempt + 1))
@@ -193,13 +192,12 @@ def translate_with_retry(translator: Translator, text: str,
 def translate_lines(entries: list[tuple[float, str]],
                     status_ph) -> list[str]:
     """Translate all Korean lines, showing progress."""
-    translator = Translator()
     translated: list[str] = []
     total = len(entries)
 
     for i, (_, ko) in enumerate(entries, 1):
         status_ph.text(f"翻譯中... ({i}/{total}）")
-        zh = translate_with_retry(translator, ko)
+        zh = translate_with_retry(ko)
         translated.append(zh)
         time.sleep(0.3)   # Avoid rate limiting
 
