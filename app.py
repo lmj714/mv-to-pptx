@@ -248,8 +248,10 @@ def download_video(url: str, tmpdir: str, status_ph) -> str | None:
     """Download lowest-quality video for frame extraction. Returns file path."""
     out_tmpl = os.path.join(tmpdir, "video.%(ext)s")
     fmt = (
-        "bestvideo[height<=360][ext=mp4]"
-        "/bestvideo[height<=360]"
+        "bestvideo[height<=720][ext=mp4]"
+        "/bestvideo[height<=720]"
+        "/bestvideo[height<=480][ext=mp4]"
+        "/bestvideo[height<=480]"
         "/worst[ext=mp4]/worst"
     )
 
@@ -288,12 +290,12 @@ def get_thumbnail(video_id: str) -> bytes | None:
 
 
 def _process_frame_image(img: Image.Image, brightness: float = 0.60) -> bytes:
-    """Resize to 854×480 (enough for PPT bg), brighten, light blur → JPEG."""
-    img = img.convert("RGB").resize((854, 480), Image.LANCZOS)
+    """Resize to 1280×720 (PPT 13.33"×7.5" @ 96dpi), brighten, light blur → JPEG."""
+    img = img.convert("RGB").resize((1280, 720), Image.LANCZOS)
     img = ImageEnhance.Brightness(img).enhance(brightness)
     img = img.filter(ImageFilter.GaussianBlur(radius=0.8))
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=80)
+    img.save(buf, format="JPEG", quality=92)
     buf.seek(0)
     return buf.read()
 
