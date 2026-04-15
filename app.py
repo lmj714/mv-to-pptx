@@ -232,12 +232,9 @@ def _ffmpeg_available() -> bool:
 def download_video(url: str, tmpdir: str, status_ph) -> str | None:
     """Download lowest-quality video for frame extraction. Returns file path."""
     out_tmpl = os.path.join(tmpdir, "video.%(ext)s")
-    # 144p is the smallest → fastest download; fall back if unavailable
     fmt = (
-        "bestvideo[height<=144][ext=mp4]"
-        "/bestvideo[height<=144]"
-        "/bestvideo[height<=240][ext=mp4]"
-        "/bestvideo[height<=240]"
+        "bestvideo[height<=360][ext=mp4]"
+        "/bestvideo[height<=360]"
         "/worst[ext=mp4]/worst"
     )
 
