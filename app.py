@@ -393,8 +393,8 @@ def build_html(title: str,
 
   /* Speed control */
   #speed-ctrl {{
-    position:fixed; bottom:4.2rem; left:50%; transform:translateX(-50%);
-    display:flex; gap:0.4rem; align-items:center; z-index:10;
+    position:fixed; bottom:50%; right:1.2rem; transform:translateY(50%);
+    display:flex; flex-direction:column; gap:0.4rem; align-items:center; z-index:10;
   }}
   #speed-ctrl button {{
     background:rgba(255,255,255,0.10); border:1px solid rgba(255,255,255,0.22);
