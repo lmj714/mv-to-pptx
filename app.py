@@ -490,6 +490,11 @@ if st.button("🎵 開始轉換"):
     if not re.match(r"https?://(www\.)?(youtube\.com|youtu\.be)/", url.strip()):
         st.error("請輸入有效的 YouTube 網址。"); st.stop()
 
+    # 移除播放清單參數，只保留 v=VIDEO_ID
+    vid = get_video_id(url.strip())
+    if vid:
+        url = f"https://www.youtube.com/watch?v={vid}"
+
     pptx_bytes: bytes | None = None
     video_title = "K-POP 影片"
 
